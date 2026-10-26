@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Utility Coach: Cache</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1d1f23; --muted: #5f6670; --card: #f5f6f8; --border: #d9dde3;
+  --accent: #2f6fde; --ok: #1f7a3d; --ok-bg: #e3f4e8; --bad: #a12a2a; --bad-bg: #fbe5e5;
+  --tmpl: #7a5b00; --tmpl-bg: #fbf1d6;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15171a; --fg: #e6e8eb; --muted: #9aa2ad; --card: #1f2226; --border: #343a42;
+    --accent: #7fa8ff; --ok: #7fd99a; --ok-bg: #173322; --bad: #ff9a9a; --bad-bg: #3a1b1b;
+    --tmpl: #f0cf6e; --tmpl-bg: #3a3018;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+       font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 880px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 1.6rem; margin: .4rem 0; }
+h2 { margin-top: 2.2rem; padding-bottom: .3rem; border-bottom: 1px solid var(--border); font-size: 1.3rem; }
+h3 { font-size: 1.1rem; margin-top: 1.4rem; }
+h4 { font-size: 1rem; margin: 1rem 0 .4rem; }
+code { font-size: .9em; }
+.tbl { overflow-x: auto; margin: .5rem 0; }
+table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+th, td { border: 1px solid var(--border); padding: .35rem .5rem; text-align: left; vertical-align: top; }
+th { background: var(--card); }
+td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+img { display: block; max-width: 100%; height: auto; margin: .6rem 0; border: 1px solid var(--border);
+      border-radius: 6px; background: #ffffff; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin: 18px 0; }
+.card h3 { margin-top: 0; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin: .5rem 0; }
+.stat { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: .4rem .6rem; }
+.stat b { display: block; font-size: 1.15rem; }
+.stat span { color: var(--muted); font-size: .85rem; }
+.advice { white-space: pre-wrap; background: var(--bg); border-left: 3px solid var(--accent);
+          padding: .6rem .8rem; border-radius: 4px; margin: .4rem 0; }
+.badge { display: inline-block; padding: .1rem .6rem; border-radius: 999px; font-size: .85rem; font-weight: 600; }
+.badge.ok { color: var(--ok); background: var(--ok-bg); }
+.badge.bad { color: var(--bad); background: var(--bad-bg); }
+.badge.tmpl, .badge.none { color: var(--tmpl); background: var(--tmpl-bg); }
+.muted { color: var(--muted); }
+.missing { color: var(--muted); font-style: italic; }
+details { margin: .5rem 0; }
+summary { cursor: pointer; color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+<header>
+<h1>Utility Coach для Cache — отчёт PoC</h1>
+<p class="muted">Собран {{ generated }}. Все выводы считает и проверяет пайплайн, LLM только формулирует советы.</p>
+</header>
+
+<section id="s1">
+<h2>{{ sections[0] }}</h2>
+<p>SCOPE.GG уже показывает игроку счётчики по гранатам: flash time, урон от гранат, число смоков. Без контекста эти цифры не говорят, хорошо ли сыграна флешка и что изменить.</p>
+<p><b>Идея.</b> Для каждой флешки модель xFlash оценивает, сколько секунд ослепления врагов в среднем даёт такой бросок. Флешку игрока сравниваем с её лайнапом и ищем лучшую альтернативу из той же зоны броска и за ту же сторону; тип броска у альтернативы может отличаться от типа броска игрока.</p>
+<ul>
+<li><b>Лайнап</b> — клетка сетки 120×120 юнитов одновременно по точке броска и по точке приземления. Она берётся внутри группы «сторона + зона броска + тип броска», и в ней должно быть не меньше {{ min_n }} флешек из train-матчей.</li>
+<li><b>Находка</b> попадает в совет, только если у обоих лайнапов n ≥ {{ min_n }}. Кроме того, 95% ДИ разницы score (секунды ослепления врагов минус 2 с за каждый тимфлеш) должен быть выше 0. ДИ строится с поправкой Бонферрони на число кандидатов, из которых выбрана альтернатива, а стандартная ошибка считается по числу матчей.</li>
+</ul>
+<p>LLM превращает проверенные факты в понятный текст, а отдельная проверка сверяет каждое число и каждую зону в тексте с фактами.</p>
+<ul>
+<li>xFlash на тестовых матчах сравнивается с двумя бейзлайнами; обучение и оценка модели разбиты по матчам (GroupKFold + hold-out); зоны KMeans построены по всем матчам без таргета.</li>
+<li>Карточки советов строятся только для игроков из hold-out матчей.</li>
+<li>Доля верифицированных советов LLM измерена в разделе «{{ sections[6] }}».</li>
+</ul>
+</section>
+
+<section id="s2">
+<h2>{{ sections[1] }}</h2>
+<p>Источник — выгрузка из MongoDB (Python pickle, 1.57 ГБ): 10 000 матчей Premier/MM на Cache, 99 921 запись «игрок × матч». Гранаты: смоки — 729 947, флешки — 643 914, HE — 565 392, молотовы — 446 164. Файл читается потоково безопасным распаковщиком с белым списком классов.</p>
+{% if dataset %}
+<div class="tbl"><table>
+<tr><th>Обработано</th><th>Значение</th></tr>
+<tr><td>Флешек</td><td class="num">{{ dataset.n_flashes }}</td></tr>
+<tr><td>Матчей</td><td class="num">{{ dataset.n_matches }}</td></tr>
+<tr><td>Из них в hold-out</td><td class="num">{{ dataset.n_test_matches }}</td></tr>
+{% if dataset.rating_share is not none %}<tr><td>Записей «игрок × матч» с рейтингом</td><td class="num">{{ dataset.rating_share }}%</td></tr>{% endif %}
+</table></div>
+{% else %}
+<p class="missing">Статистика по обработанным данным: не сгенерировано.</p>
+{% endif %}
+<h3>Ограничения датасета</h3>
+<ul>
+{% for item in limitations %}<li>{{ item }}</li>
+{% endfor %}
+</ul>
+</section>
+
+<section id="s3">
+<h2>{{ sections[2] }}</h2>
+<p>Точки бросков и приземлений всех гранат кластеризованы KMeans на зоны (высота учитывается с весом). Зоны подписаны каллаутами Cache вручную по карте плотности; те, что не удалось уверенно опознать, остались «Зона N».</p>
+{% if figures.zone_map %}<img src="{{ figures.zone_map }}" alt="Карта зон Cache">{% else %}<p class="missing">Карта зон: не сгенерировано.</p>{% endif %}
+{% if glossary %}
+<details><summary>Глоссарий зон ({{ glossary|length }})</summary>
+<div class="tbl"><table>
+<tr><th>id</th><th>Название</th></tr>
+{% for zid, name in glossary %}<tr><td class="num">{{ zid }}</td><td>{{ name }}</td></tr>
+{% endfor %}
+</table></div>
+</details>
+{% else %}
+<p class="missing">Глоссарий зон: не сгенерировано.</p>
+{% endif %}
+</section>
+
+<section id="s4">
+<h2>{{ sections[3] }}</h2>
+<p>Единица анализа — одна флешка. Регрессия <code>enemy_blind_s</code> (секунды ослепления врагов) и классификация <code>teamflash</code> (ослеплён тиммейт больше чем на 1 с). LightGBM сравнивается с глобальным средним и со средним по паре «зона броска → зона приземления». 20% матчей отложены в hold-out, на остальных 80% — GroupKFold(5) по матчам.</p>
+<p>R² ожидаемо скромный: позиций врагов в момент взрыва в данных нет. Поэтому модель оценивает средний эффект лайнапа, а не исход конкретного броска.</p>
+{% if metric_tables %}
+{% for t in metric_tables %}
+<h3>{{ t.title }}</h3>
+<div class="tbl"><table>
+<tr><th>Метрика</th>{% for m in t.models %}<th>{{ m }}</th>{% endfor %}</tr>
+{% for r in t.rows %}<tr><td><code>{{ r.metric }}</code></td>{% for v in r.vals %}<td class="num">{{ v|fmt }}</td>{% endfor %}</tr>
+{% endfor %}
+</table></div>
+{% endfor %}
+{% else %}
+<p class="missing">Метрики модели: не сгенерировано.</p>
+{% endif %}
+<h3>Калибровка teamflash</h3>
+{% if figures.calibration %}<img src="{{ figures.calibration }}" alt="Калибровка вероятности тимфлеша">{% else %}<p class="missing">График калибровки: не сгенерировано.</p>{% endif %}
+<h3>Важность признаков (SHAP через pred_contrib)</h3>
+{% if figures.importance %}<img src="{{ figures.importance }}" alt="Важность признаков">{% else %}<p class="missing">График важности: не сгенерировано.</p>{% endif %}
+{% for imp in importance %}
+<h4>{{ imp.target }}: топ признаков по среднему |вкладу|</h4>
+<div class="tbl"><table>
+<tr><th>Признак</th><th>Средний |вклад|</th></tr>
+{% for feat, val in imp.rows %}<tr><td><code>{{ feat }}</code></td><td class="num">{{ val|fmt }}</td></tr>
+{% endfor %}
+</table></div>
+{% endfor %}
+</section>
+
+<section id="s5">
+<h2>{{ sections[4] }}</h2>
+<p>Подмножество — пары «игрок × матч» с рейтингом Premier и не меньше чем {{ min_flashes }} флешками в матче. Считаем корреляцию Спирмена рейтинга с метриками флешек, 95% ДИ — бутстрепом.</p>
+{% if rating_rows %}
+<div class="tbl"><table>
+<tr><th>Метрика</th><th>rho</th><th>ДИ 95%</th><th>p</th><th>n</th><th>Вывод</th></tr>
+{% for r in rating_rows %}<tr><td>{{ r.name }}</td><td class="num">{{ r.rho|fmt }}</td><td class="num">[{{ r.ci_low|fmt }}; {{ r.ci_high|fmt }}]</td><td class="num">{{ r.p|fmt }}</td><td class="num">{{ r.n|fmt }}</td><td>{{ r.interp }}</td></tr>
+{% endfor %}
+</table></div>
+{% else %}
+<p class="missing">Результаты проверки гипотезы: не сгенерировано.</p>
+{% endif %}
+{% if figures.rating %}<img src="{{ figures.rating }}" alt="Рейтинг и метрики флешек">{% else %}<p class="missing">График рейтинга: не сгенерировано.</p>{% endif %}
+<p><b>Как читать.</b> Корреляция не доказывает причинность. Рейтинг есть только примерно у {{ rating_share_txt }}% записей, а метрики одного матча шумные: медиана — 6 флешек у игрока за матч. Если ДИ включает 0, связи с рейтингом в данных не видно.</p>
+{% if rating_conclusion %}<p><b>Вывод по данным.</b> {{ rating_conclusion }}</p>{% endif %}
+</section>
+
+<section id="s6">
+<h2>{{ sections[5] }}</h2>
+<p>Игроки из hold-out матчей, псевдонимы вместо ID. Порядок в карточке: итоги матча → находки с числами → текст совета → статус проверки.</p>
+{% if cards %}
+{% for c in cards %}
+{% if not c.ok %}
+<div class="card"><h3>карточка повреждена: {{ c.card_id }}</h3>
+<p class="missing">Файл findings неполный или устарел, карточка пропущена.</p></div>
+{% else %}
+{% set fd = c.findings %}
+{% set s = fd.match_summary %}
+<div class="card">
+<h3>{{ fd.player }}{% if fd.rating is not none %} · рейтинг {{ fd.rating }}{% endif %}</h3>
+<div class="stats">
+<div class="stat"><b>{{ s.n_flashes }}</b><span>флешек</span></div>
+<div class="stat"><b>{{ s.enemy_blind_s }} с</b><span>ослепление врагов</span></div>
+<div class="stat"><b>{{ s.teamflashes }}</b><span>тимфлешей</span></div>
+<div class="stat"><b>{{ s.flash_kills }}</b><span>флеш-фрагов</span></div>
+<div class="stat"><b>{% if s.enemy_blind_pct is not none %}{{ s.enemy_blind_pct }}{% else %}—{% endif %}</b><span>перцентиль по ослеплению</span></div>
+</div>
+{% for f in fd.findings %}
+<h4>{{ f.id }} · раунд {{ f.round }} · {{ f.side }} · {{ f.zone_from }} → {{ f.zone_to }} · {{ mode_ru.get(f.mode, f.mode) }}</h4>
+<p class="muted">Факт: {{ f.actual.enemy_blind_s }} с ослепления врагов, тимфлеш: {{ "да" if f.actual.teamflash else "нет" }}{% if f.times_in_match and f.times_in_match > 1 %}; таких бросков за матч: {{ f.times_in_match }}{% endif %}.</p>
+<div class="tbl"><table>
+<tr><th></th><th>Лайнап игрока</th><th>Альтернатива</th></tr>
+<tr><td>Приземление</td><td>{{ f.zone_to }}</td><td>{{ f.alt_lineup.zone_to }}</td></tr>
+<tr><td>Тип броска</td><td>{{ mode_ru.get(f.mode, f.mode) }}</td><td>{{ mode_ru.get(f.alt_lineup.mode, f.alt_lineup.mode) }}</td></tr>
+<tr><td>Среднее ослепление врагов в лайнапе (train), с [ДИ 95%]</td><td class="num">{{ f.own_lineup.xflash_s }} [{{ f.own_lineup.ci95_blind_s[0] }}; {{ f.own_lineup.ci95_blind_s[1] }}]</td><td class="num">{{ f.alt_lineup.xflash_s }} [{{ f.alt_lineup.ci95_blind_s[0] }}; {{ f.alt_lineup.ci95_blind_s[1] }}]</td></tr>
+<tr><td>Прогноз модели xFlash, с</td><td class="num">{{ f.own_lineup.model_xflash_s|default("—") }}</td><td class="num">{{ f.alt_lineup.model_xflash_s|default("—") }}</td></tr>
+<tr><td>Тимфлеши, % [ДИ 95%]</td><td class="num">{{ f.own_lineup.teamflash_pct }} [{{ f.own_lineup.ci95_teamflash_pct[0] }}; {{ f.own_lineup.ci95_teamflash_pct[1] }}]</td><td class="num">{{ f.alt_lineup.teamflash_pct }} [{{ f.alt_lineup.ci95_teamflash_pct[0] }}; {{ f.alt_lineup.ci95_teamflash_pct[1] }}]</td></tr>
+<tr><td>n бросков</td><td class="num">{{ f.own_lineup.n }}</td><td class="num">{{ f.alt_lineup.n }}</td></tr>
+<tr><td>yaw / pitch</td><td>—</td><td class="num">{{ f.alt_lineup.yaw }} / {{ f.alt_lineup.pitch }}</td></tr>
+<tr><td>Точка броска</td><td>—</td><td class="num">({{ f.alt_lineup.throw_pos|join(", ") }})</td></tr>
+<tr><td>Расстояние до точки броска альтернативы, юнитов</td><td>—</td><td class="num">{{ f.alt_lineup.throw_dist_u|default("—") }}</td></tr>
+<tr><td>Разница</td><td colspan="2">{{ f.diff.blind_s }} с ослепления врагов; {{ f.diff.teamflash_pct }} п.п. тимфлешей</td></tr>
+</table></div>
+{% else %}
+<p class="missing">Значимых находок по отдельным флешкам нет.</p>
+{% endfor %}
+<h4>Совет</h4>
+{% set a = c.advice %}
+{% if a is none %}
+<p><span class="badge none">{{ c.badge[1] }}</span></p>
+<p class="missing">Совет: не сгенерировано.</p>
+{% else %}
+{% if a.source == "llm" and not a.verified %}
+<p class="muted">ответ LLM не прошёл проверку — показан шаблонный совет</p>
+<div class="advice">{{ a.template_text }}</div>
+{% else %}
+<div class="advice">{{ a.text }}</div>
+{% endif %}
+<p><span class="badge {{ c.badge[0] }}">{{ c.badge[1] }}</span>{% if a.source == "llm" %} <span class="muted">модель {{ a.model }}, попыток: {{ a.attempts }}</span>{% endif %}</p>
+{% if a.source == "llm" and not a.verified %}
+<details><summary>непроверенный ответ LLM</summary>
+<div class="advice">{{ a.text }}</div>
+{% if a.check %}{% set ch = a.check %}
+<p class="muted">Ошибки проверки — числа: {{ (ch.bad_numbers or [])|join(", ") or "—" }}; зоны: {{ (ch.bad_zones or [])|join(", ") or "—" }}; направление: {% for d in ch.bad_directions or [] %}{{ d.finding }} {{ d.metric }} {{ d.value }} ({{ "заявлено больше" if d.claimed == "up" else "заявлено меньше" }}){% if not loop.last %}, {% endif %}{% else %}—{% endfor %}; слова-числа: {{ (ch.bad_words or [])|join(", ") or "—" }}.</p>
+{% endif %}
+</details>
+{% elif a.source == "llm" %}
+<details><summary>Шаблонный совет (без LLM)</summary>
+<div class="advice">{{ a.template_text }}</div>
+</details>
+{% endif %}
+{% endif %}
+</div>
+{% endif %}
+{% endfor %}
+{% else %}
+<p class="missing">Карточки советов: не сгенерировано.</p>
+{% endif %}
+</section>
+
+<section id="s7">
+<h2>{{ sections[6] }}</h2>
+{% if llm.n_advice == 0 %}
+<p class="missing">Советы: не сгенерировано.</p>
+{% elif llm.n_llm == 0 %}
+<p><b>LLM-слой отключён</b>: нет ключа OpenRouter или API недоступен. Все карточки показаны с шаблонными советами, которые верны по построению.</p>
+{% else %}
+<div class="tbl"><table>
+<tr><th>Показатель</th><th>Значение</th></tr>
+<tr><td>Модель</td><td>{{ llm.models|join(", ") }}</td></tr>
+<tr><td>Карточек с текстом LLM</td><td class="num">{{ llm.n_llm }} из {{ llm.n_advice }}</td></tr>
+<tr><td>Верифицировано карточек</td><td class="num">{{ llm.n_verified }} из {{ llm.n_llm }} ({{ llm.verified_pct|fmt }}%)</td></tr>
+<tr><td>Чисел в итоговых текстах</td><td class="num">{{ llm.numbers_total }}</td></tr>
+<tr><td>Из них подтверждены findings</td><td class="num">{{ llm.numbers_ok }} ({{ llm.numbers_ok_pct|fmt }}%)</td></tr>
+<tr><td>Упоминаний зон не из findings</td><td class="num">{{ llm.zones_bad }}</td></tr>
+<tr><td>Разниц с неверным направлением</td><td class="num">{{ llm.directions_bad }}</td></tr>
+<tr><td>Слов-чисел («треть», «в два раза» и т. п.)</td><td class="num">{{ llm.words_bad }}</td></tr>
+<tr><td>Повторных запросов после проверки</td><td class="num">{{ llm.retries }}</td></tr>
+</table></div>
+{% endif %}
+<p><b>Как проверяем.</b> Код проверяет каждый текст совета по четырём правилам:</p>
+<ul>
+<li>каждое число в тексте равно одному из значений findings этой карточки, без учёта знака и без округления: «5» при значении 4.9 не проходит;</li>
+<li>все упомянутые зоны — зоны этой карточки (броска или приземления);</li>
+<li>направление каждой упомянутой разницы «альтернатива минус лайнап игрока» совпадает с findings: «больше» при положительной разнице, «меньше» при отрицательной; «безопаснее» при большей доле тимфлешей у альтернативы — ошибка;</li>
+<li>слова-числа («треть», «половина», «вдвое», «в два раза» и т. п.) отклоняются, потому что прячут числа от проверки.</li>
+</ul>
+<p>При ошибке модель получает список ошибок и один раз пишет ответ заново. Если и второй ответ не прошёл проверку, в карточке основным советом показан шаблонный совет, а ответ LLM свёрнут в блок «непроверенный ответ LLM».</p>
+<p><b>Что проверка не покрывает.</b> Качественные объяснения (почему бросок лучше, тактические советы, формулировки) не проверяются. Направление разницы проверяется, только если по единице рядом с числом понятно, о какой метрике речь (с — ослепление, п.п. или % вместе со словом о тимфлешах или своих — тимфлеш), а в предложении есть ровно одно сравнительное слово; иначе вердикта нет. Каллауты не с Cache не распознаются как зоны.</p>
+</section>
+
+<section id="s8">
+<h2>{{ sections[7] }}</h2>
+<ul>
+{% for item in next_steps %}<li>{{ item }}</li>
+{% endfor %}
+</ul>
+</section>
+</main>
+</body>
+</html>
